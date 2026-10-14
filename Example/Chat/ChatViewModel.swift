@@ -257,10 +257,6 @@ class ChatViewModel {
         }
     }
 
-    func loadHistoryChat(sessionId: String) {
-        loadHistoryChat(conversationId: sessionId, title: nil)
-    }
-
     
     func sendMessage() {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -268,27 +264,25 @@ class ChatViewModel {
         let currentPrompt = trimmed
         inputText = ""
         
+        sendQuickReply(currentPrompt)
+    }
+    
+    func sendQuickReply(_ prompt: String) {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        
         if !Connector.shared.isConnected {
             Connector.shared.doConnectToStomp()
         }
         
-        Connector.shared.onSendMessage(messages: currentPrompt)
+        Connector.shared.onSendMessage(messages: trimmed)
         
-        let userMsg = Message(text: currentPrompt, sender: .user, timestamp: Date())
+        let userMsg = Message(text: trimmed, sender: .user, timestamp: Date())
         messages.append(userMsg)
         
         state = .loading
         
-        let lowercasedPrompt = currentPrompt.lowercased()
-        if lowercasedPrompt == "makan" {
-            Task {
-                try? await Task.sleep(nanoseconds: 600_000_000)
-                self.state = .idle
-                self.addMakanCarouselResponse()
-            }
-            return
-        }
-        
+        let lowercasedPrompt = trimmed.lowercased()
         if lowercasedPrompt == "tidur" {
             Task {
                 try? await Task.sleep(nanoseconds: 600_000_000)
@@ -304,50 +298,6 @@ class ChatViewModel {
                 self.state = .idle
             }
         }
-    }
-    
-    private func addMakanCarouselResponse() {
-        let cards = [
-            CarouselCard(
-                title: "Nasi Goreng Spesial",
-                description: "Nasi goreng lezat khas rempah pilihan dengan telur mata sapi dan emping renyah.",
-                imageName: "fork.knife",
-                actionTitle: "Pilih Menu"
-            ),
-            CarouselCard(
-                title: "Sate Ayam Madura",
-                description: "Sate ayam empuk dengan bumbu kacang gurih melimpah dan lontong hangat.",
-                imageName: "takeoutbag.and.cup.and.straw",
-                actionTitle: "Pilih Menu"
-            ),
-            CarouselCard(
-                title: "Soto Ayam Lamongan",
-                description: "Soto ayam kuah kuning segar beraroma rempah dengan taburan koya gurih.",
-                imageName: "cup.and.saucer",
-                actionTitle: "Pilih Menu"
-            ),
-            CarouselCard(
-                title: "Rendang Sapi Padang",
-                description: "Daging sapi olahan santan dan bumbu rempah asli Minang yang kaya rasa.",
-                imageName: "wineglass",
-                actionTitle: "Pilih Menu"
-            ),
-            CarouselCard(
-                title: "Es Cendol Dawet",
-                description: "Minuman segar es santan gurih, gula merah manis cair, dan cendol hijau pandan.",
-                imageName: "mug",
-                actionTitle: "Pilih Menu"
-            )
-        ]
-        
-        let aiMsg = Message(
-            text: "Berikut adalah 5 rekomendasi menu makanan dan minuman terbaik untuk Anda:",
-            sender: .ai,
-            timestamp: Date(),
-            carouselCards: cards,
-            showFeedbackBar: true
-        )
-        messages.append(aiMsg)
     }
     
     private func addTidurKnowledgeSourceResponse() {
@@ -400,10 +350,6 @@ class ChatViewModel {
         }
     }
     
-    func toggleLike(for messageId: UUID, isLike: Bool) {
-        submitFeedback(for: messageId, isLike: isLike, feedbackComment: nil)
-    }
-    
     func copyMessageText(_ text: String) {
         UIPasteboard.general.string = text
         copiedMessageToast = "Tersalin ke papan klip!"
@@ -447,53 +393,202 @@ class ChatViewModel {
         }
     }
     
-    private func processMessage(_ dolphinMessage: DolphinMessage) {
-        let isUser = dolphinMessage.isUser == true
-        let text = dolphinMessage.message ?? ""
+    private func extractCarouselCards(from dolphinMessage: DolphinMessage) -> (cards: [CarouselCard]?, textOverride: String?) {
+        // 1. Cek properti native carouselItems pada DolphinMessage
+        if let items = dolphinMessage.carouselItems, !items.isEmpty {
+            var cards: [CarouselCard] = []
+            for item in items {
+                let title = item.title ?? ""
+                let desc = item.description ?? ""
+                let img = item.imageUrl ?? "sparkles"
+                let actionTitle = item.buttons?.first?.label ?? "Pilih"
+                let actionPayload = item.buttons?.first?.payload ?? item.buttons?.first?.label
+                cards.append(CarouselCard(
+                    title: title,
+                    description: desc,
+                    imageName: img,
+                    actionTitle: actionTitle,
+                    actionPayload: actionPayload
+                ))
+            }
+            if !cards.isEmpty {
+                let rawText = dolphinMessage.message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let fallback = rawText.isEmpty ? "Berikut adalah rekomendasi untuk Anda:" : nil
+                return (cards, fallback)
+            }
+        }
         
-        guard !text.isEmpty else { return }
+        // 2. Hybrid Fallback: Parse JSON string dari dolphinMessage.message jika ada
+        guard let rawMessage = dolphinMessage.message else {
+            return (nil, nil)
+        }
         
-        if isUser {
-            return
-        } else {
-            self.state = .idle
-
-            if let lastMsg = messages.last, lastMsg.sender == .ai && (lastMsg.carouselCards != nil || lastMsg.knowledgeSources != nil) {
-                return
+        let trimmed = rawMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (trimmed.hasPrefix("{") && trimmed.hasSuffix("}")) || (trimmed.hasPrefix("[") && trimmed.hasSuffix("]")),
+              let data = trimmed.data(using: .utf8) else {
+            return (nil, nil)
+        }
+        
+        do {
+            let jsonObject = try JSONSerialization.jsonObject(with: data, options: [])
+            
+            var cardDictionaries: [[String: Any]] = []
+            var detectedText: String? = nil
+            
+            if let arr = jsonObject as? [[String: Any]] {
+                cardDictionaries = arr
+            } else if let dict = jsonObject as? [String: Any] {
+                detectedText = (dict["message"] as? String) ?? (dict["text"] as? String) ?? (dict["title"] as? String)
+                if let arr = (dict["cards"] as? [[String: Any]]) ??
+                             (dict["carousel"] as? [[String: Any]]) ??
+                             (dict["items"] as? [[String: Any]]) ??
+                             (dict["elements"] as? [[String: Any]]) {
+                    cardDictionaries = arr
+                }
             }
             
-            let serverId = dolphinMessage.id ?? dolphinMessage.transactionId
-            let messageType = dolphinMessage.messageType ?? ""
-            if messageType == "streaming_first" {
-                let aiMsg = Message(serverId: serverId, text: text, sender: .ai, timestamp: dolphinMessage.createdDate ?? Date(), isStreaming: true, showFeedbackBar: false)
-                messages.append(aiMsg)
-            } else if messageType == "streaming" {
-                if let lastIndex = messages.indices.last, messages[lastIndex].sender == .ai {
-                    messages[lastIndex].text = text
-                    messages[lastIndex].isStreaming = true
-                    if messages[lastIndex].serverId == nil {
-                        messages[lastIndex].serverId = serverId
-                    }
-                } else {
-                    let aiMsg = Message(serverId: serverId, text: text, sender: .ai, timestamp: dolphinMessage.createdDate ?? Date(), isStreaming: true, showFeedbackBar: false)
-                    messages.append(aiMsg)
+            guard !cardDictionaries.isEmpty else {
+                return (nil, nil)
+            }
+            
+            var parsedCards: [CarouselCard] = []
+            for dict in cardDictionaries {
+                let title = (dict["title"] as? String) ?? (dict["name"] as? String) ?? ""
+                let desc = (dict["description"] as? String) ?? (dict["desc"] as? String) ?? (dict["subtitle"] as? String) ?? ""
+                let img = (dict["imageUrl"] as? String) ?? (dict["image"] as? String) ?? (dict["picture"] as? String) ?? (dict["icon"] as? String) ?? "sparkles"
+                
+                var actionTitle = "Pilih"
+                var actionPayload: String? = nil
+                
+                if let action = dict["action"] as? String {
+                    actionTitle = action
+                    actionPayload = action
+                } else if let btnText = (dict["button"] as? String) ?? (dict["actionTitle"] as? String) {
+                    actionTitle = btnText
+                    actionPayload = (dict["payload"] as? String) ?? btnText
+                } else if let buttons = dict["buttons"] as? [[String: Any]], let firstBtn = buttons.first {
+                    actionTitle = (firstBtn["label"] as? String) ?? (firstBtn["title"] as? String) ?? "Pilih"
+                    actionPayload = (firstBtn["payload"] as? String) ?? (firstBtn["url"] as? String) ?? actionTitle
                 }
-            } else if messageType == "streaming_last" {
-                if let lastIndex = messages.indices.last, messages[lastIndex].sender == .ai {
-                    messages[lastIndex].text = text
-                    messages[lastIndex].isStreaming = false
-                    messages[lastIndex].showFeedbackBar = true
-                    if messages[lastIndex].serverId == nil {
-                        messages[lastIndex].serverId = serverId
-                    }
-                } else {
-                    let aiMsg = Message(serverId: serverId, text: text, sender: .ai, timestamp: dolphinMessage.createdDate ?? Date(), isStreaming: false, showFeedbackBar: true)
-                    messages.append(aiMsg)
+                
+                if !title.isEmpty || !desc.isEmpty {
+                    parsedCards.append(CarouselCard(
+                        title: title,
+                        description: desc,
+                        imageName: img,
+                        actionTitle: actionTitle,
+                        actionPayload: actionPayload
+                    ))
+                }
+            }
+            
+            if !parsedCards.isEmpty {
+                let fallbackText = detectedText ?? "Berikut adalah pilihan untuk Anda:"
+                return (parsedCards, fallbackText)
+            }
+        } catch {
+            // Bukan format carousel JSON, teruskan sebagai teks biasa
+        }
+        
+        return (nil, nil)
+    }
+    
+    private func processMessage(_ dolphinMessage: DolphinMessage) {
+        let isUser = dolphinMessage.isUser == true
+        if isUser {
+            return
+        }
+        
+        self.state = .idle
+        
+        let extraction = extractCarouselCards(from: dolphinMessage)
+        let carouselCards = extraction.cards
+        let text = extraction.textOverride ?? (dolphinMessage.message ?? "")
+        
+        guard !text.isEmpty || carouselCards != nil else { return }
+        
+        let serverId = dolphinMessage.id ?? dolphinMessage.transactionId
+        
+        let messageType = dolphinMessage.messageType ?? ""
+        let isLastStreamingChunk = (messageType == "streaming_last")
+        
+        // Cegah duplikasi frame pesan carousel yang persis sama kecuali jika merupakan closing frame streaming_last
+        if !isLastStreamingChunk,
+           let lastMsg = messages.last,
+           lastMsg.sender == .ai,
+           let lastId = lastMsg.serverId,
+           lastId == serverId,
+           lastMsg.carouselCards != nil,
+           carouselCards != nil {
+            return
+        }
+        if messageType == "streaming_first" {
+            let aiMsg = Message(
+                serverId: serverId,
+                text: text,
+                sender: .ai,
+                timestamp: dolphinMessage.createdDate ?? Date(),
+                isStreaming: true,
+                carouselCards: carouselCards,
+                showFeedbackBar: false
+            )
+            messages.append(aiMsg)
+        } else if messageType == "streaming" {
+            if let lastIndex = messages.indices.last, messages[lastIndex].sender == .ai {
+                messages[lastIndex].text = text
+                messages[lastIndex].isStreaming = true
+                if carouselCards != nil {
+                    messages[lastIndex].carouselCards = carouselCards
+                }
+                if messages[lastIndex].serverId == nil {
+                    messages[lastIndex].serverId = serverId
                 }
             } else {
-                let aiMsg = Message(serverId: serverId, text: text, sender: .ai, timestamp: dolphinMessage.createdDate ?? Date(), isStreaming: false, showFeedbackBar: true)
+                let aiMsg = Message(
+                    serverId: serverId,
+                    text: text,
+                    sender: .ai,
+                    timestamp: dolphinMessage.createdDate ?? Date(),
+                    isStreaming: true,
+                    carouselCards: carouselCards,
+                    showFeedbackBar: false
+                )
                 messages.append(aiMsg)
             }
+        } else if messageType == "streaming_last" {
+            if let lastIndex = messages.indices.last, messages[lastIndex].sender == .ai {
+                messages[lastIndex].text = text
+                messages[lastIndex].isStreaming = false
+                messages[lastIndex].showFeedbackBar = true
+                if carouselCards != nil {
+                    messages[lastIndex].carouselCards = carouselCards
+                }
+                if messages[lastIndex].serverId == nil {
+                    messages[lastIndex].serverId = serverId
+                }
+            } else {
+                let aiMsg = Message(
+                    serverId: serverId,
+                    text: text,
+                    sender: .ai,
+                    timestamp: dolphinMessage.createdDate ?? Date(),
+                    isStreaming: false,
+                    carouselCards: carouselCards,
+                    showFeedbackBar: true
+                )
+                messages.append(aiMsg)
+            }
+        } else {
+            let aiMsg = Message(
+                serverId: serverId,
+                text: text,
+                sender: .ai,
+                timestamp: dolphinMessage.createdDate ?? Date(),
+                isStreaming: false,
+                carouselCards: carouselCards,
+                showFeedbackBar: true
+            )
+            messages.append(aiMsg)
         }
     }
 }

@@ -38,6 +38,9 @@ struct ChatScreen: View {
                                                 feedbackInputText = message.feedbackComment ?? ""
                                                 showFeedbackDialog = true
                                             }
+                                        },
+                                        onActionTap: { payload in
+                                            viewModel.sendQuickReply(payload)
                                         }
                                     )
                                     .id(message.id)

@@ -9,8 +9,7 @@ struct ChatBubble: View {
     let message: Message
     var onCopy: ((String) -> Void)? = nil
     var onToggleLike: ((UUID, Bool) -> Void)? = nil
-    
-    @State private var isCursorVisible: Bool = false
+    var onActionTap: ((String) -> Void)? = nil
     
     var body: some View {
         HStack {
@@ -37,7 +36,7 @@ struct ChatBubble: View {
                 }
                 
                 if let cards = message.carouselCards, !cards.isEmpty {
-                    CarouselView(cards: cards)
+                    CarouselView(cards: cards, onActionTap: onActionTap)
                         .padding(.top, 4)
                 }
                 
@@ -136,6 +135,7 @@ struct ChatBubble: View {
 
 struct CarouselView: View {
     let cards: [CarouselCard]
+    var onActionTap: ((String) -> Void)? = nil
     @State private var currentIndex: Int = 0
     
     var body: some View {
@@ -144,7 +144,7 @@ struct CarouselView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
                         ForEach(Array(cards.enumerated()), id: \.element.id) { index, card in
-                            CarouselCardView(card: card)
+                            CarouselCardView(card: card, onActionTap: onActionTap)
                                 .id(index)
                                 .frame(width: 240)
                         }
@@ -199,6 +199,7 @@ struct CarouselView: View {
 
 private struct CarouselCardView: View {
     let card: CarouselCard
+    var onActionTap: ((String) -> Void)? = nil
     @State private var isSelected: Bool = false
     
     var body: some View {
@@ -207,10 +208,35 @@ private struct CarouselCardView: View {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(Color.accentColor.opacity(0.15))
                     .frame(height: 100)
+                    .clipped()
                 
-                Image(systemName: card.imageName)
-                    .font(.system(size: 40))
-                    .foregroundStyle(Color.accentColor)
+                if card.imageName.hasPrefix("http://") || card.imageName.hasPrefix("https://"),
+                   let url = URL(string: card.imageName) {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .empty:
+                            ProgressView()
+                                .tint(Color.accentColor)
+                        case .success(let image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                                .frame(height: 100)
+                                .clipped()
+                                .cornerRadius(12)
+                        case .failure:
+                            Image(systemName: "photo")
+                                .font(.system(size: 36))
+                                .foregroundStyle(Color.accentColor)
+                        @unknown default:
+                            EmptyView()
+                        }
+                    }
+                } else {
+                    Image(systemName: card.imageName.isEmpty ? "sparkles" : card.imageName)
+                        .font(.system(size: 40))
+                        .foregroundStyle(Color.accentColor)
+                }
             }
             
             // Title
@@ -231,6 +257,13 @@ private struct CarouselCardView: View {
             // Action Button
             Button(action: {
                 isSelected.toggle()
+                let targetAction = card.actionPayload ?? card.actionTitle
+                if targetAction.hasPrefix("http://") || targetAction.hasPrefix("https://"),
+                   let url = URL(string: targetAction) {
+                    UIApplication.shared.open(url)
+                } else {
+                    onActionTap?(targetAction)
+                }
             }) {
                 Text(isSelected ? "Terpilih ✓" : card.actionTitle)
                     .font(.caption.bold())
